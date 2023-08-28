@@ -1,0 +1,292 @@
+{
+  "Description": "DynamoDBBackup Stack",
+  "Parameters": {
+    "BackupTables": {
+      "Description": "The DynamoDB table names to be backed up.",
+      "Type": "String"
+    },
+    "LambdaEnv": {
+      "Default": "test",
+      "Description": "Environment the Lambda is in.",
+      "Type": "String"
+    },
+    "BackupPrefix": {
+      "Description": "The text prepended to snapshot names. Alphanumeric only.",
+      "Type": "String"
+    },
+    "PerTableBackupsToKeep": {
+      "Description": "The number of backups to keep per DynamoDB table.",
+      "Type": "String",
+      "Default": "7"
+    }
+  },
+  "Resources": {
+    "EventsMachineStartRole": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sts:AssumeRole"
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "events.amazonaws.com"
+                ]
+              }
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Action": [
+                    "states:StartExecution"
+                  ],
+                  "Effect": "Allow",
+                  "Resource": [
+                    {
+                      "Ref": "DynamoDBBackupStateMachine"
+                    }
+                  ]
+                }
+              ]
+            },
+            "PolicyName": "AllowMachineStart"
+          }
+        ]
+      },
+      "Type": "AWS::IAM::Role"
+    },
+    "FunctionPolicy": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "arn:aws:logs:*:*:*"
+              ]
+            },
+            {
+              "Action": [
+                "dynamodb:ListTables",
+                "dynamodb:CreateBackup",
+                "dynamodb:ListBackups",
+                "dynamodb:DeleteBackup"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "*"
+              ]
+            }
+          ]
+        },
+        "PolicyName": "function-policy",
+        "Roles": [
+          {
+            "Ref": "LambdaFunctionRole"
+          }
+        ]
+      },
+      "Type": "AWS::IAM::Policy"
+    },
+    "LambdaAlias": {
+      "Properties": {
+        "Description": "Cosmos Alias",
+        "FunctionName": {
+          "Ref": "LambdaFunction"
+        },
+        "FunctionVersion": "$LATEST",
+        "Name": {
+          "Ref": "LambdaEnv"
+        }
+      },
+      "Type": "AWS::Lambda::Alias"
+    },
+    "LambdaFunction": {
+      "Properties": {
+        "Code": {
+          "ZipFile": {
+            "Fn::Join": [
+              "\n",
+              [
+                "async function handler(event) {",
+                "   return event",
+                "}",
+                "exports.handler = handler"
+              ]
+            ]
+          }
+        },
+        "Description": "Client lambda for querying backups and creating backups for DynamoDB",
+        "Environment": {
+          "Variables": {
+            "ENVIRONMENT": {
+              "Ref": "LambdaEnv"
+            }
+          }
+        },
+        "Handler": "dist/index.handler",
+        "MemorySize": 128,
+        "Role": {
+          "Fn::GetAtt": [
+            "LambdaFunctionRole",
+            "Arn"
+          ]
+        },
+        "Runtime": "nodejs18.x",
+        "Timeout": "60"
+      },
+      "Type": "AWS::Lambda::Function"
+    },
+    "LambdaFunctionRole": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sts:AssumeRole"
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "Type": "AWS::IAM::Role"
+    },
+    "LambdaRulePermission": {
+      "Properties": {
+        "Action": "*",
+        "FunctionName": {
+          "Ref": "LambdaAlias"
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "StateMachineTrigger",
+            "Arn"
+          ]
+        }
+      },
+      "Type": "AWS::Lambda::Permission"
+    },
+    "DynamoDBBackupStateMachine": {
+      "Properties": {
+        "DefinitionString": {
+          "Fn::Sub": [
+            "{\"StartAt\":\"InvokeLambda\",\"Version\":\"1.0\",\"Comment\":\"Create manual backups of DynamoDB backups and clean up backups when required\",\"States\":{\"InvokeLambda\":{\"Comment\":\"Call the backup managing lambda\",\"Type\":\"Task\",\"Resource\":\"arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaName}:${LambdaAlias}\",\"Next\":\"IsComplete\"},\"IsComplete\":{\"Comment\":\"If the previous state returned done == true, we halt.\",\"Type\":\"Choice\",\"Default\":\"InvalidLambdaOutput\",\"Choices\":[{\"Variable\":\"$.done\",\"BooleanEquals\":true,\"Next\":\"Final\"},{\"Variable\":\"$.done\",\"BooleanEquals\":false,\"Next\":\"ShouldWait\"}]},\"ShouldWait\":{\"Comment\":\"If the previous state implied we should wait, we wait in the state machine as it's cheaper than waiting in a lambda\",\"Type\":\"Choice\",\"Default\":\"InvalidLambdaOutput\",\"Choices\":[{\"Variable\":\"$.wait\",\"BooleanEquals\":true,\"Next\":\"DoWait\"},{\"Variable\":\"$.wait\",\"BooleanEquals\":false,\"Next\":\"InvokeLambda\"}]},\"DoWait\":{\"Type\":\"Wait\",\"Seconds\":60,\"Next\":\"InvokeLambda\"},\"Final\":{\"Type\":\"Succeed\"},\"InvalidLambdaOutput\":{\"Comment\":\"Would usually indicate that the lambda hasn't had its function code updated\",\"Type\":\"Fail\",\"Cause\":\"A lambda execution resulted in unexpected output.\"}}}",
+            {
+              "LambdaAlias": {
+                "Ref": "LambdaEnv"
+              },
+              "LambdaName": {
+                "Ref": "LambdaFunction"
+              }
+            }
+          ]
+        },
+        "RoleArn": {
+          "Fn::GetAtt": [
+            "StepFunctionRole",
+            "Arn"
+          ]
+        }
+      },
+      "Type": "AWS::StepFunctions::StateMachine"
+    },
+    "StateMachineTrigger": {
+      "Properties": {
+        "Description": "Triggers the DynamoDB backup state machine daily",
+        "ScheduleExpression": "cron(30 6 * * ? *)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Ref": "DynamoDBBackupStateMachine"
+            },
+            "Id": "TargetStateMachine",
+            "Input": {
+              "Fn::Sub": [
+                "{\n  \"per_table_backups_to_keep\": \"${PerTableBackupsToKeep}\",\n\n  \"backup_tables\": \"${BackupTables}\",\n  \"backup_prefix\": \"${BackupPrefix}\",\n    \"done\": false,\n  \"tasks\": [\n \"create\",\n \"verify\",\n \"clean\"\n  ],\n \"wait\": false\n}",
+                {
+                  "BackupTables": {
+                    "Ref": "BackupTables"
+                  },
+                  "BackupPrefix": {
+                    "Ref": "BackupPrefix"
+                  },
+                  "PerTableBackupsToKeep": {
+                    "Ref": "PerTableBackupsToKeep"
+                  }
+                }
+              ]
+            },
+            "RoleArn": {
+              "Fn::GetAtt": [
+                "EventsMachineStartRole",
+                "Arn"
+              ]
+            }
+          }
+        ]
+      },
+      "Type": "AWS::Events::Rule"
+    },
+    "StepFunctionRole": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sts:AssumeRole"
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  {
+                    "Fn::Sub": "states.${AWS::Region}.amazonaws.com"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Action": [
+                    "lambda:InvokeFunction"
+                  ],
+                  "Effect": "Allow",
+                  "Resource": [
+                    "*"
+                  ]
+                }
+              ]
+            },
+            "PolicyName": "AllowLambdaInvocation"
+          }
+        ]
+      },
+      "Type": "AWS::IAM::Role"
+    }
+  }
+}

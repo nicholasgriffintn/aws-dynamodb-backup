@@ -1,0 +1,9 @@
+{
+  "include": ["./src/*"],
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": false,
+    "declaration": true,
+    "declarationMap": true
+  }
+}
